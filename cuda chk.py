@@ -1,5 +1,7 @@
 import torch
 
+import sklearn
+print(sklearn.__version__)
 
 def list_cuda_gpus():
     if not torch.cuda.is_available():

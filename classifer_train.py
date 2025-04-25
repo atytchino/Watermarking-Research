@@ -20,7 +20,7 @@ data_transforms = transforms.Compose([
 ])
 
 #load the two datasets and image loaders
-train_dataset = datasets.ImageFolder(root='archive/Training/', transform=data_transforms)
+train_dataset = datasets.ImageFolder(root='D:\\Dropbox\\UMA Augusta\\PhD\\Research Thesis\\brain_tumor_mri_dataset\\Training', transform=data_transforms)
 train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
 
 # Device configuration

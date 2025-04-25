@@ -48,20 +48,15 @@ class FilenameImageDataset(Dataset):
 
 
 ###############################################################################
-# 2) Utility: Reproduce subfolder structure in target directory
+# 2) Utility: Reproduce subfolder structure in target directory, now with epoch
 ###############################################################################
 
-def get_output_path(original_img_path, data_root, target_root):
+def get_output_path(original_img_path, data_root, target_root, epoch):
     """
     Given the original image path, compute the subfolder structure relative to `data_root`,
     then reproduce that structure under `target_root`.
 
-    e.g. if original_img_path = D:\Dropbox\...\brain_tumor_mri_dataset\class1\imageA.jpg
-         data_root         = D:\Dropbox\...\brain_tumor_mri_dataset
-         target_root       = E:\watermarking\MaxVItNoDescrim
-
-    Then relative path is "class1\imageA.jpg".
-    We'll create E:\watermarking\MaxVItNoDescrim\class1 and save a file with a _watermarked suffix.
+    The filename is appended with _epoch{epoch}_watermarked_{timestamp}.
     """
     # Compute relative path from the dataset root
     rel_path = os.path.relpath(original_img_path, start=data_root)
@@ -76,7 +71,7 @@ def get_output_path(original_img_path, data_root, target_root):
     final_subdir = os.path.join(target_root, subdir)
     os.makedirs(final_subdir, exist_ok=True)
 
-    # Build new filename with timestamp
+    # Build new filename with epoch and timestamp
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     new_filename = f"{name_no_ext}_epoch{epoch}_watermarked_{timestamp}{ext}"
 
@@ -86,20 +81,31 @@ def get_output_path(original_img_path, data_root, target_root):
 
 
 ###############################################################################
-# 3) WINDOW/GRID PARTITION HELPERS (local + grid attention for MaxViT)
+# 3) WINDOW/GRID PARTITION HELPERS
 ###############################################################################
 
 def window_partition(x, window_size):
-    # x: (B, H, W, C)
     B, H, W, C = x.shape
-    x = x.view(B, H // window_size, window_size, W // window_size, window_size, C)
+    x = x.view(
+        B,
+        H // window_size, window_size,
+        W // window_size, window_size,
+        C
+    )
     x = x.permute(0, 1, 3, 2, 4, 5).contiguous()
     windows = x.view(-1, window_size, window_size, C)
     return windows
 
 def window_unpartition(windows, window_size, H, W):
     B_ = windows.shape[0] // ((H // window_size) * (W // window_size))
-    x = windows.view(B_, H // window_size, W // window_size, window_size, window_size, -1)
+    x = windows.view(
+        B_,
+        H // window_size,
+        W // window_size,
+        window_size,
+        window_size,
+        -1
+    )
     x = x.permute(0, 1, 3, 2, 4, 5).contiguous()
     x = x.view(B_, H, W, -1)
     return x
@@ -120,11 +126,10 @@ class MultiHeadSelfAttention(nn.Module):
         self.proj = nn.Linear(dim, dim)
 
     def forward(self, x):
-        # x: (B, N, dim)
         B, N, C = x.shape
         qkv = self.qkv(x)  # (B, N, 3*dim)
         qkv = qkv.reshape(B, N, 3, self.num_heads, self.head_dim)
-        qkv = qkv.permute(2, 0, 3, 1, 4)  # (3, B, num_heads, N, head_dim)
+        qkv = qkv.permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
 
         attn = (q @ k.transpose(-2, -1)) / (self.head_dim ** 0.5)
@@ -138,11 +143,10 @@ class MultiHeadSelfAttention(nn.Module):
 
 
 ###############################################################################
-# 5) LOCAL BLOCK ATTENTION + GRID ATTENTION
+# 5) BLOCK & GRID ATTENTION
 ###############################################################################
 
 def block_attention(x, attn, window_size):
-    # x: (B, H, W, C)
     B, H, W, C = x.shape
     windows = window_partition(x, window_size)
     windows = windows.view(-1, window_size*window_size, C)
@@ -152,7 +156,6 @@ def block_attention(x, attn, window_size):
     return out
 
 def grid_attention(x, attn, grid_size):
-    # x: (B, H, W, C)
     B, H, W, C = x.shape
     cell_h = H // grid_size
     cell_w = W // grid_size
@@ -167,7 +170,7 @@ def grid_attention(x, attn, grid_size):
 
 
 ###############################################################################
-# 6) FEED-FORWARD (MLP)
+# 6) FEED-FORWARD
 ###############################################################################
 
 class FeedForward(nn.Module):
@@ -183,13 +186,10 @@ class FeedForward(nn.Module):
 
 
 ###############################################################################
-# 7) ONE MaxViT BLOCK
+# 7) MaxViTBlock
 ###############################################################################
 
 class MaxViTBlock(nn.Module):
-    """
-    block attn -> ffn -> grid attn -> ffn
-    """
     def __init__(self, dim, num_heads, window_size, grid_size, mlp_ratio=4.0):
         super().__init__()
         self.dim = dim
@@ -199,13 +199,13 @@ class MaxViTBlock(nn.Module):
 
         hidden_dim = int(dim * mlp_ratio)
 
-        # block attention
+        # block attn
         self.norm1 = nn.LayerNorm(dim)
         self.attn_block = MultiHeadSelfAttention(dim, num_heads)
         self.ffn_block = FeedForward(dim, hidden_dim)
         self.norm2 = nn.LayerNorm(dim)
 
-        # grid attention
+        # grid attn
         self.norm3 = nn.LayerNorm(dim)
         self.attn_grid = MultiHeadSelfAttention(dim, num_heads)
         self.ffn_grid = FeedForward(dim, hidden_dim)
@@ -250,7 +250,7 @@ class MaxViTBlock(nn.Module):
 
 
 ###############################################################################
-# 8) STACK MULTIPLE BLOCKS => MaxViT
+# 8) MaxViT
 ###############################################################################
 
 class MaxViT(nn.Module):
@@ -276,7 +276,7 @@ class MaxViT(nn.Module):
 
 
 ###############################################################################
-# 9) UNet building blocks
+# 9) UNet components
 ###############################################################################
 
 class DoubleConv(nn.Module):
@@ -313,7 +313,7 @@ class UpBlock(nn.Module):
 
 
 ###############################################################################
-# 10) Watermark Extractor for universal code
+# 10) WatermarkExtractor
 ###############################################################################
 
 class WatermarkExtractor(nn.Module):
@@ -337,7 +337,7 @@ class WatermarkExtractor(nn.Module):
 
 
 ###############################################################################
-# 11) UNet + Real MaxViT in the bottleneck (Option B)
+# 11) UNetWithRealMaxViT (Option B)
 ###############################################################################
 
 class UNetWithRealMaxViT(nn.Module):
@@ -397,45 +397,41 @@ class UNetWithRealMaxViT(nn.Module):
 
 
 ###############################################################################
-# 12) Save watermarked image replicating subfolder structure
+# 12) Save watermarked image with epoch in filename
 ###############################################################################
 
-def save_watermarked_image(img_tensor, original_full_path,
-                           data_root, target_root):
+def save_watermarked_image(
+    img_tensor,
+    original_full_path,
+    data_root,
+    target_root,
+    epoch
+):
     """
     1) Compute subfolder structure from data_root -> replicate in target_root
-    2) Append _watermarked + timestamp to the filename
-    3) Save image
+    2) Append: _epoch{epoch}_watermarked_{YYYYMMDD_HHMMSS}
+    3) Save the image
     """
-    # Compute final path
-    final_path = get_output_path(original_full_path, data_root, target_root)
+    final_path = get_output_path(original_full_path, data_root, target_root, epoch)
 
-    # Make sure pixel values are in [0,1] range
     clamped = img_tensor.clamp(0,1)
-    vutils.save_image(
-        img_tensor,
-        final_path,
-        normalize=True,  # scale values for better visual
-        value_range=(0, 1))
+    vutils.save_image(clamped, final_path)
     return final_path
 
 
 ###############################################################################
-# 13) TRAINING with DataParallel, preserving subfolders
+# 13) TRAINING: with nn.DataParallel, subfolders, epoch in filename
 ###############################################################################
 
 def train_unet_real_maxvit_implicit(
-    data_dir,                 # e.g. r"D:\Dropbox\...\brain_tumor_mri_dataset"
-    target_dir,               # e.g. r"E:\watermarking\MaxVItNoDescrim"
+    data_dir,
+    target_dir,
     epochs=5,
-    batch_size=2,
+    batch_size=8,
     lr=1e-5,
     code_dim=128,
     model_params=None
 ):
-    """
-    We'll replicate the subfolder structure from `data_dir` into `target_dir` for watermarked images.
-    """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Single universal watermark code
@@ -443,7 +439,6 @@ def train_unet_real_maxvit_implicit(
 
     transform = T.Compose([T.Resize((512,512)), T.ToTensor()])
     dataset = FilenameImageDataset(data_dir, transform=transform)
-
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=2)
 
     if model_params is None:
@@ -474,7 +469,7 @@ def train_unet_real_maxvit_implicit(
 
     optimizer = optim.Adam(list(model.parameters()) + list(extractor.parameters()), lr=lr)
 
-    print("Starting multi-GPU training with real MaxViT in the bottleneck (Option B), preserving subfolders.")
+    print("Starting multi-GPU training with real MaxViT (Option B), preserving subfolders & epoch in filenames.")
     for epoch in range(1, epochs+1):
         model.train()
         extractor.train()
@@ -502,22 +497,23 @@ def train_unet_real_maxvit_implicit(
             total_recon += loss_recon.item()
             total_wm += loss_wm.item()
 
-            # Save a sample every 50 batches
+            # Save the first image in the batch every 50 batches
             if (batch_idx+0) % 1 == 0:
                 print(f"Epoch[{epoch}/{epochs}], Batch {batch_idx+1}/{len(loader)}")
                 print(f"  Recon Loss: {loss_recon.item():.4f}, WM Loss: {loss_wm.item():.4f}")
-                # Save the first image in the batch
-                if epoch >=2:
+
+                if epoch >= 0 : # Save watermarked images starting from second epoch
+
                     saved_img = watermarked[0].detach().cpu()
-                    original_path = full_paths[0]  # The full path from the dataset
-                    out_path = save_watermarked_image(saved_img, original_path, data_dir, target_dir)
+                    original_path = full_paths[0]
+                    out_path = save_watermarked_image(saved_img, original_path, data_dir, target_dir, epoch)
                     print(f"  -> Saved watermarked image: {out_path}")
 
         avg_recon = total_recon / len(loader)
         avg_wm = total_wm / len(loader)
         print(f"=> Epoch {epoch}/{epochs} done. Recon: {avg_recon:.4f}, WM: {avg_wm:.4f}")
 
-    print("Training complete. Subfolder structure preserved in the target directory!")
+    print("Training complete. Subfolder structure + epoch in filenames are now preserved!")
 
 
 ###############################################################################
@@ -525,14 +521,14 @@ def train_unet_real_maxvit_implicit(
 ###############################################################################
 
 if __name__ == "__main__":
-    data_dir = r"D:\\Dropbox\\UMA Augusta\\PhD\Research Thesis\\brain_tumor_mri_dataset"
-    target_dir = r"E:\\watermarking\\MaxVItNoDescrim"
+    data_dir = r"D:\Dropbox\UMA Augusta\PhD\Research Thesis\brain_tumor_mri_dataset"
+    target_dir = r"E:\watermarking\MaxVItNoDescrim"
 
     train_unet_real_maxvit_implicit(
         data_dir=data_dir,
         target_dir=target_dir,
-        epochs=5,      # adjust
-        batch_size=2,  # if 2 GPUs, each GPU gets 1 image
+        epochs=5,
+        batch_size=8,
         lr=1e-5,
         code_dim=128,
         model_params={
